@@ -1,4 +1,7 @@
-﻿using SPTarkov.DI.Annotations;
+﻿using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
+using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Models.Common;
@@ -7,8 +10,6 @@ using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
-using System.Reflection;
-using System.Text;
 
 namespace UnrestrictedAttachments;
 
@@ -30,10 +31,8 @@ public record ModMetadata : AbstractModMetadata {
 [Injectable(TypePriority = OnLoadOrder.PostDBModLoader + 2)]
 public class AmmoStats(
     DatabaseServer databaseServer,
-    DatabaseService databaseService,
     LocaleService localeService,
     ModHelper modHelper,
-    ConfigServer configServer,
     ItemHelper itemHelper,
     ISptLogger<AmmoStats> logger)
     : IOnLoad {
@@ -41,6 +40,35 @@ public class AmmoStats(
     Dictionary<MongoId, TemplateItem>? itemDatabase;
     Dictionary<string, string>? locales;
     ModConfig? config;
+
+    Dictionary<string, MongoId> slotToMod = new() {
+        {"mod_pistol_grip", BaseClasses.PISTOL_GRIP },
+        {"mod_magazine", BaseClasses.MAGAZINE },
+        {"mod_receiver", BaseClasses.RECEIVER },
+        {"mod_stock", BaseClasses.STOCK },
+        {"mod_charge", BaseClasses.CHARGE },
+        {"mod_barrel", BaseClasses.BARREL },
+        {"mod_handguard", BaseClasses.HANDGUARD },
+        {"mod_mount", BaseClasses.MOUNT },
+        {"mod_muzzle", BaseClasses.MUZZLE },
+        {"mod_scope", BaseClasses.OPTIC_SCOPE },// come back to this
+        {"mod_sight_rear", BaseClasses.SIGHTS }, // rear sight?
+        {"mod_tactical", BaseClasses.TACTICAL_COMBO },
+        {"mod_gas_block", BaseClasses.GASBLOCK },
+        {"mod_launcher", BaseClasses.LAUNCHER },
+        {"mod_foregrip", BaseClasses.FOREGRIP },
+        {"mod_sight_front", BaseClasses.SIGHTS }, // front sight?
+        {"mod_equipment", BaseClasses.EQUIPMENT },
+        {"mod_flashlight", BaseClasses.FLASHLIGHT },
+        {"mod_bipod", BaseClasses.BIPOD },
+        {"mod_pistol_grip_akms", BaseClasses.PISTOL_GRIP }, //akms special
+        {"mod_stock_akms", BaseClasses.STOCK }, // akms special
+        {"mod_nvg", BaseClasses.SPECIAL_SCOPE }, // maybe special scope?
+        {"mod_stock_axis", BaseClasses.STOCK }, // axis special
+        {"mod_trigger", BaseClasses.MOD }, // IDK
+        {"mod_hammer", BaseClasses.MOD }, //IDK
+        {"mod_catch", BaseClasses.MOD } // IDK
+    };
 
     public Task OnLoad() {
         var pathToMod = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
@@ -53,6 +81,54 @@ public class AmmoStats(
         itemDatabase = databaseServer.GetTables().Templates.Items;
         locales = localeService.GetLocaleDb();
 
+        Dictionary<string, HashSet<MongoId>> slotToMods = new();
+
+        foreach (var (itemId, item) in itemDatabase) {
+            if (item.Properties == null || item.Properties.Slots == null) continue;
+            foreach (var slot in item.Properties.Slots) {
+                if (slot.Name == null) continue;
+                string slotName = NormalizeModSlot(slot.Name);
+                if (!slotName.Contains("mod")) continue;
+
+                if (!slotToMods.ContainsKey(slotName)) slotToMods.Add(slotName, new HashSet<MongoId>());
+
+                if (slot.Properties == null || slot.Properties.Filters == null || slot.Properties.Filters.Count() == 0) continue;
+
+                foreach(var filter in slot.Properties.Filters) {
+                    if (filter.Filter == null) continue;
+                    slotToMods[slotName].UnionWith(filter.Filter);
+                }
+            }
+        }
+
+        foreach (var (itemId, item) in itemDatabase) {
+            if (item.Properties == null || item.Properties.Slots == null) continue;
+            foreach (var slot in item.Properties.Slots) {
+                if (slot.Name == null) continue;
+                string slotName = NormalizeModSlot(slot.Name);
+                
+
+                if (!slotToMods.ContainsKey(slotName)) continue;
+
+                if (slot.Properties == null || slot.Properties.Filters == null || slot.Properties.Filters.Count() == 0) continue;
+
+                slot.Properties.Filters.First().Filter = slotToMods[slotName];
+            }
+        }
+
+        foreach (var (modSlot, mods) in slotToMods) {
+            logger.Success(modSlot);
+            foreach (var mod in mods) {
+                if (locales.ContainsKey($"{mod} Name")){
+                    logger.Info($"    {locales[$"{mod} Name"]}");
+                } else {
+                    logger.Warning(mod);
+                }
+            }
+        }
+
+        return Task.CompletedTask;
+/*
         Dictionary<MongoId, List<MongoId>> mods = new();
 
         // Loop through all items
@@ -69,9 +145,18 @@ public class AmmoStats(
             } else {
                 mods[item.Parent].Add(itemId);
             }
+
+            if (itemHelper.IsOfBaseclass(itemId, BaseClasses.ASSAULT_SCOPE)) {
+                logger.Info($"{locales[itemId + " Name"]} assault");
+            }
+            if (itemHelper.IsOfBaseclass(itemId, BaseClasses.OPTIC_SCOPE)) {
+                logger.Info($"{locales[itemId + " Name"]} optic");
+            }
+            if (itemHelper.IsOfBaseclass(itemId, BaseClasses.SPECIAL_SCOPE)) {
+                logger.Info($"{locales[itemId + " Name"]} special");
+            }
         }
 
-        HashSet<string> slotnames = new();
         // Loop through a second time
         foreach (var (itemId, item) in itemDatabase) {
             if (item.Type != "Item" || item.Properties == null) continue;
@@ -84,17 +169,51 @@ public class AmmoStats(
             // If item has mod slots
             if (item.Properties.Slots != null) {
                 foreach (var slot in item.Properties.Slots) {
-                    slotnames.Add(slot.Name);
+                    if (!slot.Name.Contains("mod")) continue;
+                    string slotname = NormalizeModSlot(slot.Name);
                 }
             }
         }
 
-        foreach (var slotname in slotnames) {
-            logger.Info(slotname);
-        }
+
+        return Task.CompletedTask;*/
+    }
+
+    static string NormalizeModSlot(string input) {
+        input = input.ToLowerInvariant();
+
+        input = input.Replace("pistolgrip", "pistol_grip");
+        input = input.Replace("reciever", "receiver");
+
+        input = Regex.Replace(input, @"_?\d+$", "");
+
+        if (input.StartsWith("mod_tactical"))
+            return "mod_tactical";
+
+        if (input.StartsWith("mod_mount"))
+            return "mod_mount";
+
+        if (input.StartsWith("mod_scope"))
+            return "mod_scope";
+
+        if (input.StartsWith("mod_equipment"))
+            return "mod_equipment";
+
+        if (input.StartsWith("mod_muzzle"))
+            return "mod_muzzle";
+
+        if (input.StartsWith("mod_stock") && !input.Contains("axis") && !input.Contains("akms"))
+            return "mod_stock";
+
+        return input;
+    }
+
+    static MongoId? SlotToMods(string slotname) {
+        string slot = NormalizeModSlot(slotname);
 
 
-        return Task.CompletedTask;
+
+        return null;
     }
 }
 
